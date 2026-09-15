@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>IMY-triFHIR — Rendez-vous / calendrier patient</title>
+  <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+  <style>
+    :root{--bg:#fbf6ef;--ink:#241531;--paper:#fff;--line:#e7dfd8;--coral:#e95757;--teal:#2f9e8f;--amber:#a2760a}
+    *{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+    button,input{font:inherit}.shell{display:grid;grid-template-columns:250px 1fr;min-height:100vh}
+    aside{background:var(--ink);color:white;padding:24px 16px}.logo{font-size:1.15rem;font-weight:800;margin-bottom:24px}
+    .nav{display:block;width:100%;border:0;background:transparent;color:#ddd;text-align:left;padding:11px 12px;border-radius:10px;margin:4px 0}
+    .nav.active{background:var(--coral);color:white}.main{padding:28px;max-width:1100px}.card{background:var(--paper);border:1px solid var(--line);border-radius:18px;padding:22px;margin-bottom:18px}
+    .row{display:flex;gap:12px;align-items:center;flex-wrap:wrap}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+    input{padding:10px 12px;border:1px solid var(--line);border-radius:10px;min-width:220px}.btn{border:0;border-radius:999px;padding:10px 16px;background:var(--coral);color:white;font-weight:650;cursor:pointer}
+    .btn.alt{background:var(--teal)}.btn.ghost{background:white;color:var(--ink);border:1px solid var(--line)}.btn:disabled{opacity:.45;cursor:not-allowed}
+    .banner{padding:13px 15px;border-radius:12px;margin:12px 0}.ok{background:#e5f5f2;color:#17685d}.warn{background:#fff3d9;color:#795500}.err{background:#fde4e4;color:#a72f2f}
+    .muted{opacity:.65;font-size:.9rem}.score{font-size:3rem;font-weight:800}.mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;word-break:break-word;background:#1e1725;color:#f7f1fa;padding:16px;border-radius:12px;overflow:auto}
+    .item{padding:10px 0;border-bottom:1px solid var(--line)}
+    .flow{display:flex;gap:0;overflow-x:auto;margin:18px 0 24px}.flow-step{min-width:135px;flex:1;text-align:center;position:relative}
+    .flow-step:not(:first-child):before{content:'';position:absolute;top:17px;right:50%;width:100%;height:3px;background:var(--line);z-index:0}
+    .flow-step.done:not(:first-child):before{background:var(--teal)}.flow-dot{position:relative;z-index:1;width:34px;height:34px;border-radius:50%;margin:auto;background:white;border:2px solid var(--line);display:grid;place-items:center;font-weight:800}
+    .flow-step.done .flow-dot{background:var(--teal);border-color:var(--teal);color:white}.flow-step.current .flow-dot{background:var(--coral);border-color:var(--coral);color:white}
+    .flow-label{font-size:.78rem;margin-top:7px;white-space:nowrap}.answer-grid{display:grid;grid-template-columns:1fr auto;gap:8px 18px}.answer{padding:9px 0;border-bottom:1px solid var(--line)}
+    .pill{padding:4px 10px;border-radius:999px;background:#f1ece8;font-size:.8rem}
+    @media(max-width:760px){.shell{grid-template-columns:1fr}aside{position:static}.grid{grid-template-columns:1fr}.main{padding:16px}}
+  </style>
+</head>
+<body>
+<div id="app">
+  <div class="shell">
+    <aside>
+      <div class="logo">IMY-triFHIR</div>
+      <button class="nav" :class="{active:view==='patients'}" @click="view='patients'">🔎 Patients</button>
+      <button class="nav" :class="{active:view==='suivi'}" :disabled="!patient" @click="view='suivi'">📋 Suivi HBI</button>
+      <button class="nav" :class="{active:view==='rdv'}" :disabled="!patient" @click="view='rdv'">📅 Rendez-vous</button>
+      <button class="nav" :class="{active:view==='resources'}" :disabled="!patient" @click="view='resources'">🧩 Ressources FHIR</button>
+      <button class="nav" :class="{active:view==='hl7'}" :disabled="!appointment || appointment.status!=='booked'" @click="view='hl7'">🔁 Mapping + HL7 v2</button>
+      <button class="nav" :class="{active:view==='logs'}" @click="view='logs'">🧾 Traçabilité ({{logs.length}})</button>
+      <button style="display:none" :class="{active:view==='hl7'}"></button>
+      <p class="muted" style="margin-top:24px">FHIR R4<br>HAPI FHIR public</p>
+    </aside>
+
+    <main class="main">
+      <h1>Rendez-vous / calendrier patient</h1>
+      <p class="muted">Serveur : {{FHIR_BASE}} — aucune persistance locale.</p>
+
+      <div v-if="error" class="banner err">{{error}}</div>
+      <div v-if="patient" class="card">
+        <div class="row" style="justify-content:space-between">
+          <div><b>Flux de prise en charge</b><div class="muted">{{flowMessage}}</div></div>
+          <span class="pill">Étape {{flowStep}} / 5</span>
+        </div>
+        <div class="flow">
+          <div class="flow-step" :class="flowClass(1)"><div class="flow-dot">1</div><div class="flow-label">Questionnaire</div></div>
+          <div class="flow-step" :class="flowClass(2)"><div class="flow-dot">2</div><div class="flow-label">Score HBI</div></div>
+          <div class="flow-step" :class="flowClass(3)"><div class="flow-dot">3</div><div class="flow-label">{{hbiScore!==null && hbiScore < HBI_THRESHOLD ? 'Compte-rendu' : 'RDV proposé'}}</div></div>
+          <div class="flow-step" :class="flowClass(4)"><div class="flow-dot">4</div><div class="flow-label">Validation patient</div></div>
+          <div class="flow-step" :class="flowClass(5)"><div class="flow-dot">5</div><div class="flow-label">HL7 SIU^S12</div></div>
+        </div>
+      </div>
+
+      <section v-if="view==='patients'" class="card">
+        <h2>Rechercher un patient</h2>
+        <div class="row">
+          <input v-model="patientQuery" @keyup.enter="searchPatients" placeholder="Nom du patient" />
+          <button class="btn" @click="searchPatients" :disabled="busy || !patientQuery.trim()">Rechercher</button>
+          <button class="btn alt" @click="initDemoData" :disabled="busy">🧪 Initialiser les données de démonstration</button>
+        </div>
+        <p class="muted">Ce bouton crée/retrouve deux patients de test sur HAPI FHIR avec leurs QuestionnaireResponse HBI : un cas favorable et un cas défavorable.</p>
+        <div v-if="patients.length" style="margin-top:14px">
+          <div v-for="p in patients" :key="p.id" class="item row" style="justify-content:space-between">
+            <div><b>{{displayName(p)}}</b><div class="muted">Patient/{{p.id}} · {{p.birthDate || 'date inconnue'}}</div></div>
+            <button class="btn alt" @click="selectPatient(p)">Ouvrir</button>
+          </div>
+        </div>
+        <p v-else-if="searched" class="muted">Aucun patient trouvé.</p>
+      </section>
+
+      <template v-if="patient && view==='suivi'">
+        <div class="card">
+          <div class="row"><h2>{{displayName(patient)}}</h2><span class="pill">Patient/{{patient.id}}</span></div>
+          <p class="muted">QuestionnaireResponse réels chargés depuis le serveur FHIR.</p>
+          <button class="btn ghost" @click="loadQuestionnaires">↻ Rafraîchir</button>
+        </div>
+
+        <div class="card">
+          <h2>Questionnaires reçus</h2>
+          <div v-for="qr in questionnaires" :key="qr.id" class="item row" style="justify-content:space-between">
+            <div><b>QuestionnaireResponse/{{qr.id}}</b><div class="muted">{{formatDate(qr.authored)}}</div></div>
+            <button class="btn ghost" @click="selectedQR=qr">Afficher les réponses</button>
+          </div>
+          <p v-if="!questionnaires.length" class="muted">Aucun QuestionnaireResponse trouvé pour ce patient.</p>
+        </div>
+
+        <div v-if="selectedQR" class="card">
+          <h2>Réponses du questionnaire</h2>
+          <p class="muted">QuestionnaireResponse/{{selectedQR.id}} — {{formatDate(selectedQR.authored)}}</p>
+          <div class="answer-grid">
+            <template v-for="a in questionnaireAnswers(selectedQR)" :key="a.key">
+              <div class="answer">{{a.label}}</div>
+              <div class="answer"><b>{{a.value}}</b></div>
+            </template>
+          </div>
+          <button class="btn" style="margin-top:16px" @click="analyseQuestionnaire(selectedQR)" :disabled="busy">
+            Calculer le score HBI et poursuivre le flux
+          </button>
+        </div>
+
+        <div v-if="hbiScore!==null" class="card">
+          <h2>Score HBI</h2>
+          <div class="score">{{hbiScore}}</div>
+          <div class="banner" :class="hbiScore < HBI_THRESHOLD ? 'ok':'warn'">
+            {{hbiScore < HBI_THRESHOLD ? 'Score favorable : pas de rendez-vous.' : 'Score défavorable : rendez-vous proposé automatiquement.'}}
+          </div>
+          <p v-if="diagnosticReport" class="muted">DiagnosticReport/{{diagnosticReport.id}}</p>
+          <button v-if="appointment" class="btn alt" @click="view='rdv'">Voir le rendez-vous proposé</button>
+        </div>
+      </template>
+
+      <template v-if="patient && view==='rdv'">
+        <div class="card">
+          <h2>Rendez-vous du patient</h2>
+          <button class="btn ghost" @click="loadAppointments">↻ Charger depuis FHIR</button>
+          <div v-for="a in appointments" :key="a.id" class="item">
+            <b>Appointment/{{a.id}}</b> — <span class="pill">{{a.status}}</span>
+            <div class="muted">{{a.start ? formatDate(a.start) : 'Créneau non défini'}}</div>
+            <button class="btn ghost" style="margin-top:8px" @click="appointment=a">Sélectionner</button>
+          </div>
+        </div>
+
+        <div v-if="hbiScore!==null && hbiScore>=HBI_THRESHOLD && !appointment" class="card">
+          <h2>⚠️ Consultation recommandée</h2>
+          <div class="banner warn">
+            HBI = <b>{{hbiScore}}</b> : état défavorable. Le praticien doit proposer un créneau de consultation.
+          </div>
+          <div class="grid">
+            <label>Date proposée<br><input type="date" v-model="slot.date" :min="todayLocal"></label>
+            <label>Heure proposée<br><input type="time" v-model="slot.time"></label>
+          </div>
+          <button class="btn" style="margin-top:14px" @click="proposeAppointment" :disabled="busy || !slot.date || !slot.time">
+            📅 Proposer ce rendez-vous
+          </button>
+          <p class="muted">Le clic crée réellement l'Appointment sur HAPI FHIR avec le statut <b>proposed</b>.</p>
+        </div>
+
+        <div v-if="appointment" class="card">
+          <h2>Appointment/{{appointment.id}}</h2>
+          <p>Statut : <b>{{appointment.status}}</b></p>
+
+          <div v-if="appointment.status==='proposed' && !appointment.start">
+            <p class="muted">Définissez le créneau à proposer au patient.</p>
+            <div class="grid">
+              <label>Date<br><input type="date" v-model="slot.date" :min="todayLocal"></label>
+              <label>Heure<br><input type="time" v-model="slot.time"></label>
+            </div>
+            <button class="btn" style="margin-top:14px" @click="saveSlot" :disabled="busy || !slot.date || !slot.time">Enregistrer le créneau proposé</button>
+          </div>
+
+          <div v-else-if="appointment.status==='proposed'">
+            <div class="banner warn">
+              <b>Étape 4 — En attente de validation du patient</b><br>
+              Rendez-vous proposé : {{formatDate(appointment.start)}}.
+            </div>
+            <div class="card" style="margin-top:14px;background:#faf7f4">
+              <h3>🧪 Simulation de la réponse du patient</h3>
+              <p class="muted">Pour la démonstration, simulez ici la réponse que le patient donnerait depuis son interface.</p>
+              <div class="row">
+                <button class="btn alt" @click="acceptAppointment" :disabled="busy">✓ Simuler : patient accepte</button>
+                <button class="btn" @click="declineAppointment" :disabled="busy">✕ Simuler : patient refuse — nouveau créneau</button>
+                <button class="btn ghost" @click="sendReminder" :disabled="busy">🔔 Simuler une relance</button>
+              </div>
+            </div>
+          </div>
+
+          <div v-else-if="appointment.status==='booked'" class="banner ok">
+            Rendez-vous confirmé : {{formatDate(appointment.start)}}. Le message SIU^S12 peut être généré.
+            <div><button class="btn alt" style="margin-top:10px" @click="generateHL7">Générer SIU^S12</button></div>
+          </div>
+
+          <div v-else-if="appointment.status==='cancelled'" class="banner err">Rendez-vous refusé / annulé. Aucun HL7 n'est généré pour ce rendez-vous. Proposez un nouveau créneau.</div>
+        </div>
+      </template>
+
+      <template v-if="patient && view==='resources'">
+        <div class="card">
+          <h2>🧩 Ressources FHIR réellement utilisées</h2>
+          <p class="muted">Cette vue montre les ressources lues ou créées sur HAPI FHIR. FHIR reste la source de vérité ; rien n'est persisté localement.</p>
+          <button class="btn ghost" @click="refreshFHIRResources" :disabled="busy">↻ Rafraîchir depuis FHIR</button>
+        </div>
+        <div class="card" v-for="r in usedFHIRResources" :key="r.key">
+          <div class="row" style="justify-content:space-between"><h3>{{r.type}}</h3><span class="pill">{{r.reference}}</span></div>
+          <p class="muted">{{r.role}}</p>
+          <details><summary>Voir le JSON FHIR</summary><pre class="mono">{{prettyJSON(r.resource)}}</pre></details>
+        </div>
+      </template>
+
+      <section v-if="view==='hl7'" class="card">
+        <h2>🔁 Transformation FHIR → HL7 v2 SIU^S12</h2>
+        <p class="muted">Le message est produit uniquement après validation du patient, lorsque Appointment.status = booked.</p>
+        <div class="banner ok" v-if="appointment?.status==='booked'">Appointment/{{appointment.id}} est confirmé : la conversion vers le système d'agenda hospitalier est autorisée.</div>
+        <h3>Mapping explicite</h3>
+        <div class="item" v-for="m in hl7Mappings" :key="m.target">
+          <b>{{m.source}}</b> <span class="muted">({{m.value || '—'}})</span><br>
+          ↓ transformation<br><b>{{m.target}}</b> — {{m.meaning}}
+        </div>
+        <h3>Message cible</h3>
+        <pre class="mono">{{hl7Message || 'Cliquez sur « Générer SIU^S12 » depuis le rendez-vous confirmé.'}}</pre>
+        <p class="muted">Segments démontrés : MSH (en-tête), SCH (rendez-vous), PID (patient), RGS (groupe de ressources), AIS (service/créneau), AIP (professionnel).</p>
+      </section>
+
+      <section v-if="view==='logs'" class="card">
+        <h2>Traçabilité minimale</h2>
+        <div v-for="(l,i) in [...logs].reverse()" :key="i" class="item mono" style="background:#f7f3ef;color:#241531;padding:10px">
+          {{l.time}} {{l.method}} {{l.url}} → {{l.status}}
+        </div>
+        <p v-if="!logs.length" class="muted">Aucun appel pour cette session.</p>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+const {createApp, ref, reactive} = Vue;
+
+createApp({
+  setup(){
+    const FHIR_BASE = 'https://hapi.fhir.org/baseR4';
+    const HBI_THRESHOLD = 5;
+    const view = ref('patients');
+    const busy = ref(false);
+    const error = ref('');
+    const logs = ref([]);
+    const patientQuery = ref('');
+    const patients = ref([]);
+    const searched = ref(false);
+    const patient = ref(null);
+    const questionnaires = ref([]);
+    const selectedQR = ref(null);
+    const diagnosticReport = ref(null);
+    const diagnosticReports = ref([]);
+    const hbiScore = ref(null);
+    const appointment = ref(null);
+    const appointments = ref([]);
+    const hl7Message = ref('');
+    const slot = reactive({date:'', time:''});
+
+    function localDateISO(d=new Date()){
+      const y=d.getFullYear();
+      const m=String(d.getMonth()+1).padStart(2,'0');
+      const day=String(d.getDate()).padStart(2,'0');
+      return `${y}-${m}-${day}`;
+    }
+    const todayLocal = localDateISO();
+
+    function validateFutureSlot(){
+      if(!slot.date || !slot.time){
+        error.value='Choisissez une date et une heure pour proposer le rendez-vous.';
+        return null;
+      }
+      if(slot.date < todayLocal){
+        error.value="La date du rendez-vous ne peut pas être antérieure à aujourd'hui.";
+        return null;
+      }
+      const start=new Date(`${slot.date}T${slot.time}:00`);
+      if(Number.isNaN(start.getTime())){
+        error.value='Date ou heure de rendez-vous invalide.';
+        return null;
+      }
+      if(start.getTime() <= Date.now()){
+        error.value="Le rendez-vous doit être prévu dans le futur. Pour aujourd'hui, choisissez une heure ultérieure à l'heure actuelle.";
+        return null;
+      }
+      return start;
+    }
+
+    const log = (method,url,status) => logs.value.push({method,url,status,time:new Date().toLocaleTimeString('fr-FR')});
+
+    async function fhir(method, path, body){
+      busy.value = true; error.value = '';
+      const url = `${FHIR_BASE}/${path}`;
+      const controller=new AbortController();
+      const timeout=setTimeout(()=>controller.abort(),10000);
+      try{
+        const r = await fetch(url,{
+          method,
+          headers:{'Accept':'application/fhir+json','Content-Type':'application/fhir+json'},
+          body: body ? JSON.stringify(body) : undefined,
+          signal:controller.signal
+        });
+        log(method,url,r.status);
+        const data = await r.json().catch(()=>null);
+        if(!r.ok){
+          const details = data?.issue?.map(i=>i.diagnostics || i.details?.text).filter(Boolean).join(' — ');
+          throw new Error(details || `Erreur FHIR HTTP ${r.status}`);
+        }
+        return data;
+      }catch(e){
+        log(method,url,0);
+        error.value = e.name==='AbortError' ? `Délai dépassé (10 s) pour ${method} ${path}.` : `Échec de l'échange FHIR : ${e.message}`;
+        return null;
+      }finally{ clearTimeout(timeout); busy.value=false; }
+    }
+    const resources = b => (b?.entry || []).map(e=>e.resource).filter(Boolean);
+    const displayName = p => {
+      const n=p?.name?.[0]||{};
+      return n.text || [...(n.given||[]),n.family].filter(Boolean).join(' ') || 'Patient sans nom';
+    };
+    const formatDate = d => d ? new Date(d).toLocaleString('fr-FR') : 'date inconnue';
+
+
+    async function findPatientByIdentifier(value){
+      const b=await fhir('GET',`Patient?identifier=${encodeURIComponent(value)}&_count=5`);
+      return resources(b)[0] || null;
+    }
+
+    async function ensureDemoPatient(identifierValue, family, given){
+      let p=await findPatientByIdentifier(identifierValue);
+      if(p) return p;
+      return await fhir('POST','Patient',{
+        resourceType:'Patient',
+        active:true,
+        identifier:[{system:'https://imy-trifhir.example.org/demo-patient',value:identifierValue}],
+        name:[{use:'official',family,given:[given]}],
+        gender:'female',
+        birthDate:'1998-05-12'
+      });
+    }
+
+    async function hasDemoQR(patientId, qrCode){
+      const b=await fhir('GET',`QuestionnaireResponse?patient=${encodeURIComponent(patientId)}&identifier=${encodeURIComponent('https://imy-trifhir.example.org/demo-qr|'+qrCode)}&_count=5`);
+      return resources(b).length>0;
+    }
+
+    async function ensureDemoQR(p, code, values){
+      if(await hasDemoQR(p.id,code)) return;
+      await fhir('POST','QuestionnaireResponse',{
+        resourceType:'QuestionnaireResponse',
+        identifier:{system:'https://imy-trifhir.example.org/demo-qr',value:code},
+        status:'completed',
+        subject:{reference:`Patient/${p.id}`,display:displayName(p)},
+        authored:new Date().toISOString(),
+        item:[
+          {linkId:'bien-etre',text:'Bien-être général (0 = très bien, 4 = très mauvais)',answer:[{valueInteger:values.wellbeing}]},
+          {linkId:'douleur-abdominale',text:'Douleur abdominale (0 = aucune, 3 = sévère)',answer:[{valueInteger:values.pain}]},
+          {linkId:'selles-liquides',text:'Nombre de selles liquides par jour',answer:[{valueInteger:values.stools}]},
+          {linkId:'masse-abdominale',text:'Masse abdominale (0 = aucune, 3 = certaine et douloureuse)',answer:[{valueInteger:values.mass}]},
+          {linkId:'arthralgie',text:'Complication : arthralgie',answer:[{valueBoolean:values.arthralgia}]}
+        ]
+      });
+    }
+
+    async function initDemoData(){
+      error.value='';
+      const fav=await ensureDemoPatient('IMY-DEMO-HBI-FAVORABLE','IMYTestCrohnFavorable','Patiente');
+      if(!fav?.id) return;
+      await ensureDemoQR(fav,'IMY-QR-FAVORABLE',{wellbeing:1,pain:1,stools:1,mass:0,arthralgia:false}); // HBI 3
+
+      const def=await ensureDemoPatient('IMY-DEMO-HBI-DEFAVORABLE','IMYTestCrohnDefavorable','Patiente');
+      if(!def?.id) return;
+      await ensureDemoQR(def,'IMY-QR-DEFAVORABLE',{wellbeing:2,pain:2,stools:4,mass:0,arthralgia:true}); // HBI 9
+
+      patientQuery.value='IMYTestCrohn';
+      const b=await fhir('GET',`Patient?name=${encodeURIComponent('IMYTestCrohn')}&_count=20`);
+      patients.value=b ? resources(b) : [fav,def];
+      searched.value=true;
+      if(!error.value) alert('Données de démonstration prêtes : IMYTestCrohnFavorable (HBI 3) et IMYTestCrohnDefavorable (HBI 9).');
+    }
+
+    async function searchPatients(){
+      searched.value=true; patients.value=[];
+      const q=encodeURIComponent(patientQuery.value.trim());
+      const bundle=await fhir('GET',`Patient?name=${q}&_count=20`);
+      if(bundle) patients.value=resources(bundle);
+    }
+
+    async function selectPatient(p){
+      patient.value=p; selectedQR.value=null; diagnosticReport.value=null; hbiScore.value=null; appointment.value=null; hl7Message.value='';
+      view.value='suivi';
+      await Promise.all([loadQuestionnaires(),loadDiagnosticReports(),loadAppointments()]);
+    }
+
+    async function loadQuestionnaires(){
+      if(!patient.value) return;
+      const b=await fhir('GET',`QuestionnaireResponse?patient=${encodeURIComponent(patient.value.id)}&_sort=-authored&_count=50`);
+      questionnaires.value=b ? resources(b) : [];
+      if(!selectedQR.value && questionnaires.value.length) selectedQR.value=questionnaires.value[0];
+    }
+
+
+    async function loadDiagnosticReports(){
+      if(!patient.value) return;
+      const b=await fhir('GET',`DiagnosticReport?patient=${encodeURIComponent(patient.value.id)}&_sort=-date&_count=20`);
+      diagnosticReports.value=b ? resources(b) : [];
+      if(!diagnosticReport.value && diagnosticReports.value.length) diagnosticReport.value=diagnosticReports.value[0];
+    }
+
+    async function loadAppointments(){
+      if(!patient.value) return;
+      const b=await fhir('GET',`Appointment?patient=${encodeURIComponent(patient.value.id)}&_sort=-date&_count=50`);
+      appointments.value=b ? resources(b) : [];
+      if(appointment.value?.id){
+        const fresh=appointments.value.find(a=>a.id===appointment.value.id);
+        if(fresh) appointment.value=fresh;
+      }
+    }
+
+    function flattenItems(items,out=[]){
+      for(const item of (items||[])){ out.push(item); if(item.item) flattenItems(item.item,out); }
+      return out;
+    }
+    function answerValue(item){
+      const a=item?.answer?.[0]; if(!a) return undefined;
+      for(const k of ['valueInteger','valueDecimal','valueBoolean','valueString','valueCoding'])
+        if(a[k]!==undefined) return a[k];
+    }
+    function normalize(s){return (s||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');}
+    function findAnswer(qr, aliases){
+      const items=flattenItems(qr.item);
+      const hit=items.find(i=>{
+        const hay=normalize(`${i.linkId||''} ${i.text||''}`);
+        return aliases.some(a=>hay.includes(normalize(a)));
+      });
+      return answerValue(hit);
+    }
+    function asNumber(v, fallback=0){
+      if(typeof v==='number') return v;
+      if(typeof v==='boolean') return v?1:0;
+      if(v && typeof v==='object' && v.code!==undefined) return Number(v.code)||fallback;
+      const n=Number(v); return Number.isFinite(n)?n:fallback;
+    }
+
+    // HBI = bien-être (0–4) + douleur abdominale (0–3) + selles liquides/jour
+    //     + masse abdominale (0–3) + 1 point par complication.
+    function calculateHBI(qr){
+      const wellbeing=asNumber(findAnswer(qr,['bien-etre','bien etre','wellbeing','general-wellbeing']));
+      const pain=asNumber(findAnswer(qr,['douleur-abdominale','douleur abdominale','abdominal-pain','maux-ventre']));
+      const liquidStools=asNumber(findAnswer(qr,['selles-liquides','selles liquides','liquid-stools','nombre-selles']));
+      const mass=asNumber(findAnswer(qr,['masse-abdominale','masse abdominale','abdominal-mass']));
+      const complicationAliases=['arthralgie','uveite','erytheme','aphte','fissure','fistule','abces','complication'];
+      const items=flattenItems(qr.item);
+      let complications=0;
+      for(const i of items){
+        const hay=normalize(`${i.linkId||''} ${i.text||''}`);
+        if(complicationAliases.some(a=>hay.includes(normalize(a)))){
+          const v=answerValue(i);
+          if(v===true || asNumber(v)>0) complications++;
+        }
+      }
+      return Math.max(0,Math.round(wellbeing+pain+liquidStools+mass+complications));
+    }
+
+
+    function questionnaireAnswers(qr){
+      return flattenItems(qr?.item).filter(i=>i.answer?.length).map((i,index)=>{
+        const v=answerValue(i);
+        let shown=v;
+        if(typeof v==='boolean') shown=v?'Oui':'Non';
+        else if(v && typeof v==='object') shown=v.display || v.code || JSON.stringify(v);
+        return {key:`${i.linkId||index}-${index}`,label:i.text || i.linkId || `Question ${index+1}`,value:shown};
+      });
+    }
+
+    const flowStep = Vue.computed(()=>{
+      if(hl7Message.value) return 5;
+      if(appointment.value?.status==='booked') return 5;
+      if(appointment.value?.status==='cancelled') return 3;
+      // Dès qu'un créneau proposed existe, on passe à l'étape 4 :
+      // attente de la décision du patient.
+      if(appointment.value?.status==='proposed' && appointment.value?.start) return 4;
+      if(appointment.value || hbiScore.value!==null) return 3;
+      if(selectedQR.value) return 2;
+      return 1;
+    });
+    const flowMessage = Vue.computed(()=>{
+      if(hl7Message.value) return 'Rendez-vous confirmé et message HL7 v2 SIU^S12 généré.';
+      if(appointment.value?.status==='booked') return 'Le patient a validé le rendez-vous. La conversion HL7 v2 est disponible.';
+      if(appointment.value?.status==='cancelled') return 'Le patient a refusé le rendez-vous. Aucun SIU^S12 ne sera généré.';
+      if(appointment.value?.status==='proposed' && appointment.value?.start) return 'Rendez-vous proposé : le processus est maintenant en attente de validation du patient.';
+      if(appointment.value?.status==='proposed') return 'Rendez-vous créé : le praticien doit encore définir le créneau.';
+      if(hbiScore.value!==null && hbiScore.value < HBI_THRESHOLD) return 'Score HBI favorable : compte-rendu transmis, aucun rendez-vous nécessaire.';
+      if(hbiScore.value!==null && hbiScore.value >= HBI_THRESHOLD) return 'Score HBI défavorable : passage automatique vers la proposition de rendez-vous.';
+      if(selectedQR.value) return 'Réponses affichées : calculez maintenant le score HBI.';
+      return 'Questionnaire reçu : afficher les réponses puis calculer le score HBI.';
+    });
+    function flowClass(n){
+      return {done:n<flowStep.value,current:n===flowStep.value};
+    }
+
+    async function analyseQuestionnaire(qr){
+      const score=calculateHBI(qr);
+      hbiScore.value=score;
+      const unfavorable=score>=HBI_THRESHOLD;
+      const text=`Score HBI : ${score}. ${unfavorable?'Score défavorable : consultation à proposer.':'Score favorable : poursuite du télésuivi, sans rendez-vous.'}`;
+      const report=await fhir('POST','DiagnosticReport',{
+        resourceType:'DiagnosticReport',
+        status:'final',
+        code:{text:'Harvey-Bradshaw Index (HBI) — télésuivi Crohn'},
+        subject:{reference:`Patient/${patient.value.id}`},
+        effectiveDateTime:new Date().toISOString(),
+        conclusion:text,
+        presentedForm:[{
+          contentType:'text/plain',
+          title:'Score HBI',
+          data:btoa(unescape(encodeURIComponent(text)))
+        }]
+      });
+      if(!report?.id) return;
+      diagnosticReport.value=report;
+      await loadDiagnosticReports();
+
+      if(unfavorable){
+        // HBI défavorable : passage à l'écran de proposition du rendez-vous.
+        appointment.value=null;
+        view.value='rdv';
+      }else{
+        await fhir('POST','Communication',{
+          resourceType:'Communication',
+          status:'completed',
+          subject:{reference:`Patient/${patient.value.id}`},
+          recipient:[{reference:`Patient/${patient.value.id}`}],
+          sent:new Date().toISOString(),
+          payload:[{contentString:`Compte-rendu de télésuivi : HBI ${score}, score favorable. Aucun rendez-vous n'est créé.`}]
+        });
+        appointment.value=null;
+      }
+    }
+
+
+    async function proposeAppointment(){
+      if(!patient.value || hbiScore.value===null || hbiScore.value < HBI_THRESHOLD) return;
+      const start=validateFutureSlot();
+      if(!start) return;
+      const end=new Date(start.getTime()+30*60000);
+      const appt=await fhir('POST','Appointment',{
+        resourceType:'Appointment',
+        status:'proposed',
+        description:`Consultation gastro-entérologie proposée après HBI défavorable (${hbiScore.value})`,
+        supportingInformation: diagnosticReport.value?.id
+          ? [{reference:`DiagnosticReport/${diagnosticReport.value.id}`,display:`Compte-rendu HBI ${hbiScore.value}`}]
+          : undefined,
+        start:start.toISOString(),
+        end:end.toISOString(),
+        minutesDuration:30,
+        participant:[
+          {
+            actor:{reference:`Patient/${patient.value.id}`,display:displayName(patient.value)},
+            required:'required',
+            status:'needs-action'
+          }
+        ]
+      });
+      if(appt?.id){
+        appointment.value=appt;
+        await loadAppointments();
+        // On reste sur Rendez-vous mais le flux avance automatiquement à l'étape 4.
+        // L'Appointment sélectionné reste celui qui vient d'être proposé.
+        appointment.value=appt;
+        view.value='rdv';
+      }
+    }
+
+    async function updateAppointment(patch){
+      if(!appointment.value?.id) return null;
+      const updated={...appointment.value,...patch,resourceType:'Appointment',id:appointment.value.id};
+      const saved=await fhir('PUT',`Appointment/${appointment.value.id}`,updated);
+      if(saved?.id){appointment.value=saved;await loadAppointments();}
+      return saved;
+    }
+
+    async function saveSlot(){
+      const start=validateFutureSlot();
+      if(!start) return;
+      const end=new Date(start.getTime()+30*60*1000);
+      await updateAppointment({status:'proposed',start:start.toISOString(),end:end.toISOString()});
+    }
+
+    async function acceptAppointment(){
+      const participant=(appointment.value.participant||[]).map(p =>
+        p.actor?.reference===`Patient/${patient.value.id}` ? {...p,status:'accepted'} : p
+      );
+      const saved=await updateAppointment({status:'booked',participant});
+      if(saved?.status==='booked'){
+        generateHL7();
+        view.value='hl7';
+      }
+    }
+
+    async function declineAppointment(){
+      if(!appointment.value) return;
+      const participant=(appointment.value.participant||[]).map(p =>
+        p.actor?.reference===`Patient/${patient.value.id}` ? {...p,status:'declined'} : p
+      );
+      const refusedId=appointment.value.id;
+      const saved=await updateAppointment({status:'cancelled',participant});
+
+      if(saved?.status==='cancelled'){
+        log('INFO',`Appointment/${refusedId} refusé : nouveau créneau à proposer.`);
+        // L'ancien RDV reste dans FHIR en cancelled pour la traçabilité.
+        // On revient à l'étape 3 pour proposer un nouveau rendez-vous.
+        appointment.value=null;
+        slot.date='';
+        slot.time='';
+        hl7Message.value='';
+        await loadAppointments();
+        appointment.value=null;
+        view.value='rdv';
+      }
+    }
+
+    async function sendReminder(){
+      await fhir('POST','Communication',{
+        resourceType:'Communication',
+        status:'completed',
+        subject:{reference:`Patient/${patient.value.id}`},
+        recipient:[{reference:`Patient/${patient.value.id}`}],
+        sent:new Date().toISOString(),
+        payload:[{contentString:`Relance : merci de valider ou refuser le rendez-vous Appointment/${appointment.value.id}.`}]
+      });
+    }
+
+    const hl7Escape = v => String(v??'').replace(/\|/g,'\\F\\').replace(/\^/g,'\\S\\').replace(/~/g,'\\R\\').replace(/&/g,'\\T\\');
+    const ts = d => {
+      const x=new Date(d), p=n=>String(n).padStart(2,'0');
+      return `${x.getFullYear()}${p(x.getMonth()+1)}${p(x.getDate())}${p(x.getHours())}${p(x.getMinutes())}${p(x.getSeconds())}`;
+    };
+    function generateHL7(){
+      if(!appointment.value || appointment.value.status!=='booked'){
+        error.value='Le SIU^S12 ne peut être généré que pour un Appointment booked.'; return;
+      }
+      const p=patient.value, n=p.name?.[0]||{}, id=p.identifier?.[0]?.value||p.id;
+      const practitioner=(appointment.value.participant||[]).find(x=>x.actor?.reference?.startsWith('Practitioner/'));
+      const practitionerId=practitioner?.actor?.reference?.split('/')[1]||'IMY';
+      const duration=Math.max(1,Math.round((new Date(appointment.value.end)-new Date(appointment.value.start))/60000));
+      const msgId=`IMY${Date.now()}`;
+      const lines=[
+        `MSH|^~\\&|IMY-triFHIR|TELESUIVI|SIH|HOPITAL|${ts(new Date())}||SIU^S12|${msgId}|P|2.5`,
+        `SCH|${hl7Escape(appointment.value.id)}||||||||||||||||||||||||Booked`,
+        `PID|||${hl7Escape(id)}||${hl7Escape(n.family)}^${hl7Escape((n.given||[]).join(' '))}||${(p.birthDate||'').replaceAll('-','')}|${(p.gender||'').charAt(0).toUpperCase()}`,
+        `RGS|1`,
+        `AIS|1||CONSULT^Consultation gastro-enterologie|${ts(appointment.value.start)}|${duration}|min`,
+        `AIP|1||${hl7Escape(practitionerId)}^${hl7Escape(practitioner?.actor?.display||'Gastro-enterologue')}|${ts(appointment.value.start)}`
+      ];
+      hl7Message.value=lines.join('\r');
+      view.value='hl7';
+    }
+
+    const prettyJSON = r => JSON.stringify(r,null,2);
+    const usedFHIRResources = Vue.computed(()=>{
+      const out=[];
+      if(patient.value) out.push({key:`Patient/${patient.value.id}`,type:'Patient',reference:`Patient/${patient.value.id}`,role:'Identité du patient concerné par le télésuivi et le rendez-vous.',resource:patient.value});
+      if(selectedQR.value) out.push({key:`QuestionnaireResponse/${selectedQR.value.id}`,type:'QuestionnaireResponse',reference:`QuestionnaireResponse/${selectedQR.value.id}`,role:'Réponses réelles utilisées pour calculer le score HBI.',resource:selectedQR.value});
+      if(diagnosticReport.value) out.push({key:`DiagnosticReport/${diagnosticReport.value.id}`,type:'DiagnosticReport',reference:`DiagnosticReport/${diagnosticReport.value.id}`,role:'Compte-rendu FHIR contenant la conclusion du score HBI.',resource:diagnosticReport.value});
+      if(appointment.value) out.push({key:`Appointment/${appointment.value.id}`,type:'Appointment',reference:`Appointment/${appointment.value.id}`,role:'Rendez-vous : proposed pendant l’attente, booked après acceptation, cancelled après refus.',resource:appointment.value});
+      return out;
+    });
+    async function refreshFHIRResources(){ await Promise.all([loadQuestionnaires(),loadDiagnosticReports(),loadAppointments()]); }
+    const hl7Mappings = Vue.computed(()=>{
+      const p=patient.value||{}, n=p.name?.[0]||{}, a=appointment.value||{};
+      const practitioner=(a.participant||[]).find(x=>x.actor?.reference?.startsWith('Practitioner/'));
+      return [
+        {source:'Appointment.id',value:a.id,target:'SCH-1',meaning:'Identifiant du rendez-vous'},
+        {source:'Appointment.status',value:a.status,target:'SCH-25',meaning:'Statut du rendez-vous'},
+        {source:'Patient.identifier / Patient.id',value:p.identifier?.[0]?.value||p.id,target:'PID-3',meaning:'Identifiant patient'},
+        {source:'Patient.name',value:[...(n.given||[]),n.family].filter(Boolean).join(' '),target:'PID-5',meaning:'Nom du patient'},
+        {source:'Appointment.start',value:a.start?formatDate(a.start):'',target:'AIS-4',meaning:'Début du créneau'},
+        {source:'Appointment.end − start',value:a.start&&a.end?`${Math.round((new Date(a.end)-new Date(a.start))/60000)} min`:'',target:'AIS-5/6',meaning:'Durée et unité'},
+        {source:'Appointment.participant Practitioner',value:practitioner?.actor?.display||'Gastro-entérologue de démonstration',target:'AIP-3',meaning:'Professionnel participant'}
+      ];
+    });
+
+    return {FHIR_BASE,HBI_THRESHOLD,todayLocal,view,busy,error,logs,patientQuery,patients,searched,patient,
+      questionnaires,selectedQR,diagnosticReport,diagnosticReports,hbiScore,appointment,appointments,hl7Message,slot,flowStep,flowMessage,usedFHIRResources,hl7Mappings,
+      displayName,formatDate,prettyJSON,questionnaireAnswers,flowClass,searchPatients,initDemoData,selectPatient,loadQuestionnaires,loadDiagnosticReports,loadAppointments,refreshFHIRResources,
+      analyseQuestionnaire,proposeAppointment,saveSlot,acceptAppointment,declineAppointment,sendReminder,generateHL7};
+  }
+}).mount('#app');
+</script>
+</body>
+</html>
